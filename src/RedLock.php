@@ -1,30 +1,30 @@
 <?php
+declare(strict_types = 1);
+
+namespace RedLock;
+
+use Redis;
 
 class RedLock
 {
     private $retryDelay;
     private $retryCount;
     private $clockDriftFactor = 0.01;
-
     private $quorum;
 
-    private $servers = array();
     private $instances = array();
 
-    function __construct(array $servers, $retryDelay = 200, $retryCount = 3)
+    public function __construct(array $redisInstances, int $retryDelay = 200, int $retryCount = 3)
     {
-        $this->servers = $servers;
-
+        $this->instances = $redisInstances;
         $this->retryDelay = $retryDelay;
         $this->retryCount = $retryCount;
 
-        $this->quorum  = min(count($servers), (count($servers) / 2 + 1));
+        $this->quorum = min(count($this->instances), (count($this->instances) / 2 + 1));
     }
 
-    public function lock($resource, $ttl)
+    public function lock(string $resource, int $ttl)
     {
-        $this->initInstances();
-
         $token = uniqid();
         $retry = $this->retryCount;
 
@@ -50,7 +50,7 @@ class RedLock
                 return [
                     'validity' => $validityTime,
                     'resource' => $resource,
-                    'token'    => $token,
+                    'token' => $token,
                 ];
 
             } else {
@@ -60,7 +60,7 @@ class RedLock
             }
 
             // Wait a random delay before to retry
-            $delay = mt_rand(floor($this->retryDelay / 2), $this->retryDelay);
+            $delay = random_int((int) floor($this->retryDelay / 2), $this->retryDelay);
             usleep($delay * 1000);
 
             $retry--;
@@ -70,36 +70,21 @@ class RedLock
         return false;
     }
 
-    public function unlock(array $lock)
+    public function unlock(string $resource, string $token)
     {
-        $this->initInstances();
-        $resource = $lock['resource'];
-        $token    = $lock['token'];
-
         foreach ($this->instances as $instance) {
             $this->unlockInstance($instance, $resource, $token);
         }
     }
 
-    private function initInstances()
+    private function lockInstance(Redis $instance, string $resource, string $token, int $ttl)
     {
-        if (empty($this->instances)) {
-            foreach ($this->servers as $server) {
-                list($host, $port, $timeout) = $server;
-                $redis = new \Redis();
-                $redis->connect($host, $port, $timeout);
+        $result = $instance->set($resource, $token, ['NX', 'PX' => $ttl]);
 
-                $this->instances[] = $redis;
-            }
-        }
+        return $result;
     }
 
-    private function lockInstance($instance, $resource, $token, $ttl)
-    {
-        return $instance->set($resource, $token, ['NX', 'PX' => $ttl]);
-    }
-
-    private function unlockInstance($instance, $resource, $token)
+    private function unlockInstance(Redis $instance, string $resource, string $token)
     {
         $script = '
             if redis.call("GET", KEYS[1]) == ARGV[1] then
